@@ -262,4 +262,4 @@ MIT License - see [LICENSE](AutoReverse/LICENSE) for details.
 
 ---
 
-**AutoReverse Plugin** - Accelerating reverse engineering with AI assistance 🚀 
+**AutoReverse Plugin** - Accelerating reverse engineering with AI assistance 🚀
