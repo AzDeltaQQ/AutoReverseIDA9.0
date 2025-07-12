@@ -47,8 +47,8 @@ python AutoReverse/install_windows.py
 1. Copy files to your IDA Pro plugins directory:
    ```
    C:\Program Files\IDA Professional 9.0\plugins\
-   ├── auto_reverse.py                    # Standalone script
-   └── AutoReverse/                       # Full plugin package
+   ├── auto_reverse.py                    # This file must go in plugins folder by itself.
+   └── AutoReverse/                       #  This Folder must be in plugins folder .
        ├── modules/
        │   ├── config_manager.py
        │   ├── context_gatherer.py
