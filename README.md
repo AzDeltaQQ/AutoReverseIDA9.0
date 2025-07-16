@@ -3,7 +3,9 @@
 🤖 **AI-powered reverse engineering assistant using Google Gemini API**
 
 AutoReverse is a comprehensive IDA Pro 9.0 plugin designed to accelerate reverse engineering workflows with AI assistance. Specifically tuned for **World of Warcraft 3.3.5a** binary analysis, but applicable to general x86 reverse engineering tasks.
+<img width="1598" height="576" alt="AutoReverse" src="https://github.com/user-attachments/assets/a6b1a394-288f-4b5d-b552-200e1f99cc32" />
 
+Note: Currently only coded for using free gemini tier. Model Gemini pro 2.5. eventually will add multi model support, paid tier, etc. Also currently only tested "Analyze Current Item" ,  will start working on other features soon TM.
 ## 🌟 Features
 
 ### 🧠 **AI-Powered Function Analysis**
@@ -46,8 +48,8 @@ python AutoReverse/install_windows.py
 1. Copy files to your IDA Pro plugins directory:
    ```
    C:\Program Files\IDA Professional 9.0\plugins\
-   ├── auto_reverse.py                    # Standalone script
-   └── AutoReverse/                       # Full plugin package
+   ├── auto_reverse.py                    # This file must go in plugins folder by itself.
+   └── AutoReverse/                       #  This Folder must be in plugins folder .
        ├── modules/
        │   ├── config_manager.py
        │   ├── context_gatherer.py
