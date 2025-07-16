@@ -50,13 +50,14 @@ class MultiLineTextEdit(QTextEdit):
 class AutoReverseResultsWidget(ida_kernwin.PluginForm):
     """Custom widget for displaying AutoReverse analysis results"""
     
-    def __init__(self, title: str = "AutoReverse Results", chat_session=None, prompts=None):
+    def __init__(self, title: str = "AutoReverse Results", chat_session=None, prompts=None, is_restored=False):
         super().__init__()
         self.title = title
         self.chat_session = chat_session
         self.results_text = ""
         self.prompts = prompts or {}  # Store system and user prompts
         self.widget = None
+        self.is_restored = is_restored  # Flag to distinguish restored vs new sessions
         
     def OnCreate(self, form):
         """Called when the widget is created"""
@@ -65,9 +66,9 @@ class AutoReverseResultsWidget(ida_kernwin.PluginForm):
             self.widget = self.FormToPyQtWidget(form)
             
             # Import Qt modules
-            # from PyQt5.QtWidgets import QVBoxLayout, QTextEdit, QLabel, QSplitter
-            # from PyQt5.QtCore import Qt
-            # from PyQt5.QtGui import QFont
+            from PyQt5.QtWidgets import QVBoxLayout, QTextEdit, QLabel, QSplitter, QHBoxLayout, QPushButton, QStatusBar
+            from PyQt5.QtCore import Qt
+            from PyQt5.QtGui import QFont
             
             # Create layout
             layout = QVBoxLayout()
@@ -156,10 +157,15 @@ class AutoReverseResultsWidget(ida_kernwin.PluginForm):
             layout.addWidget(self.status_bar)
 
             # Set initial content
-            if self.prompts:
-                self.show_prompts_if_enabled()
-            if self.results_text:
-                self.append_message("AI", self.results_text)
+            if self.is_restored and self.chat_session and hasattr(self.chat_session, 'history') and self.chat_session.history:
+                # This is a restored chat session - rebuild conversation from history
+                self.restore_chat_history()
+            else:
+                # This is a new analysis - use normal initialization
+                if self.prompts:
+                    self.show_prompts_if_enabled()
+                if self.results_text:
+                    self.append_message("AI", self.results_text)
             self.update_status()
             
             self.widget.setLayout(layout)
@@ -254,10 +260,96 @@ class AutoReverseResultsWidget(ida_kernwin.PluginForm):
         if self.chat_session:
             current = self.chat_session.get_token_count()
             max_t = self.chat_session.get_max_tokens()
-            self.status_bar.showMessage(f"Tokens: {current} / {max_t}")
+            
+            # Get model info if available
+            model_info = ""
+            if hasattr(self.chat_session, 'config_manager') and self.chat_session.config_manager:
+                model_name = self.chat_session.config_manager.get_model()
+                model_data = self.chat_session.config_manager.get_model_info(model_name)
+                if model_data:
+                    model_info = f" | Model: {model_data.get('display_name', model_name)}"
+            
+            self.status_bar.showMessage(f"Tokens: {current:,} / {max_t:,}{model_info}")
         else:
             self.status_bar.showMessage("Chat not initialized")
     
+    def restore_chat_history(self):
+        """Restore chat history from an existing chat session"""
+        try:
+            if not self.chat_session or not hasattr(self.chat_session, 'history'):
+                # Fallback to normal initialization
+                self._fallback_to_normal_init()
+                return
+            
+            # Check if history is empty
+            if not self.chat_session.history:
+                # Fallback to normal initialization
+                self._fallback_to_normal_init()
+                return
+            
+            # Show restoration indicator
+            self.append_message("System", "**=== RESTORED CHAT SESSION ===**\n\nPrevious conversation has been restored. You can continue chatting below.")
+            
+            # Show prompts if enabled (for context)
+            if self.prompts:
+                self.show_prompts_if_enabled()
+            
+            # Rebuild conversation from chat history
+            messages_restored = 0
+            for message in self.chat_session.history:
+                try:
+                    if hasattr(message, 'role') and hasattr(message, 'parts'):
+                        role = message.role
+                        # Get text content from parts
+                        content_parts = []
+                        for part in message.parts:
+                            if hasattr(part, 'text'):
+                                content_parts.append(part.text)
+                        
+                        if content_parts:
+                            content = "\n".join(content_parts)
+                            
+                            # Map roles to display names
+                            if role == 'user':
+                                sender = "User"
+                            elif role == 'model':
+                                sender = "AI"
+                            else:
+                                sender = role.capitalize()
+                            
+                            # Add message to display
+                            self.append_message(sender, content)
+                            messages_restored += 1
+                    
+                except Exception as msg_error:
+                    print(f"Error restoring message: {msg_error}")
+                    continue
+            
+            # If no messages were restored, fall back to normal init
+            if messages_restored == 0:
+                self._fallback_to_normal_init()
+                return
+            
+            print(f"AutoReverse: Restored {messages_restored} messages from chat history")
+            
+        except Exception as e:
+            print(f"Error restoring chat history: {e}")
+            # Fallback to normal initialization
+            self._fallback_to_normal_init()
+
+    def _fallback_to_normal_init(self):
+        """Fallback to normal initialization when history restoration fails"""
+        # Show prompts if enabled
+        if self.prompts:
+            self.show_prompts_if_enabled()
+        
+        # Show original results if available
+        if self.results_text:
+            self.append_message("System", "**Chat session restored** (using original analysis as history was unavailable)")
+            self.append_message("AI", self.results_text)
+        else:
+            self.append_message("System", "**Chat session restored** - you can continue chatting.")
+
     def show_prompts_if_enabled(self):
         """Show prompts if the setting is enabled"""
         try:

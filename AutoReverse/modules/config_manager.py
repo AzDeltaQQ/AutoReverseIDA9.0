@@ -12,6 +12,42 @@ class ConfigManager:
     def __init__(self):
         self.config_file = Path.home() / ".autoreverse_config.json"
         self.config = self.load_config()
+        
+        # Available models with their rate limits and capabilities
+        self.available_models = {
+            "gemini-2.5-pro": {
+                "display_name": "Gemini 2.5 Pro",
+                "rpm": 5,
+                "tpm": 250000,
+                "rpd": 100,
+                "description": "Best for complex analysis (lower rate limits)",
+                "recommended_for": "Complex reverse engineering tasks"
+            },
+            "gemini-2.5-flash": {
+                "display_name": "Gemini 2.5 Flash", 
+                "rpm": 10,
+                "tpm": 250000,
+                "rpd": 250,
+                "description": "Faster with good capabilities", 
+                "recommended_for": "General purpose analysis"
+            },
+            "gemini-2.0-flash-exp": {
+                "display_name": "Gemini 2.0 Flash (Experimental)",
+                "rpm": 15,
+                "tpm": 1000000,
+                "rpd": 200,
+                "description": "High throughput, good for frequent requests",
+                "recommended_for": "Analyzing many functions"
+            },
+            "gemini-2.0-flash-thinking-exp": {
+                "display_name": "Gemini 2.0 Flash Thinking (Experimental)",
+                "rpm": 15,
+                "tpm": 1000000, 
+                "rpd": 200,
+                "description": "Enhanced reasoning capabilities",
+                "recommended_for": "Complex logic analysis"
+            }
+        }
     
     def load_config(self):
         """Load configuration from file"""
@@ -24,7 +60,7 @@ class ConfigManager:
         
         return {
             "api_key": "",
-            "model": "gemini-pro",
+            "model": "gemini-2.5-pro",  # Updated default to match current best practices
             "temperature": 0.7,
             "max_tokens": 4096,
             "show_prompts": False
@@ -51,12 +87,36 @@ class ConfigManager:
     
     def get_model(self):
         """Get the model name"""
-        return self.config.get("model", "gemini-pro")
+        return self.config.get("model", "gemini-2.5-pro")
     
     def set_model(self, model):
         """Set the model name"""
-        self.config["model"] = model
-        return self.save_config()
+        if model in self.available_models:
+            self.config["model"] = model
+            return self.save_config()
+        else:
+            print(f"Warning: Unknown model {model}, using default")
+            return False
+    
+    def get_available_models(self):
+        """Get all available models with their information"""
+        return self.available_models
+    
+    def get_model_info(self, model_name=None):
+        """Get information about a specific model or the current model"""
+        if model_name is None:
+            model_name = self.get_model()
+        return self.available_models.get(model_name, {})
+    
+    def get_recommended_model_for_task(self, task_type="general"):
+        """Get recommended model based on task type"""
+        recommendations = {
+            "general": "gemini-2.5-flash",
+            "complex": "gemini-2.5-pro", 
+            "bulk": "gemini-2.0-flash-exp",
+            "reasoning": "gemini-2.0-flash-thinking-exp"
+        }
+        return recommendations.get(task_type, "gemini-2.5-pro")
     
     def get_temperature(self):
         """Get the temperature setting"""
@@ -92,4 +152,11 @@ class ConfigManager:
     def set_show_prompts(self, show_prompts):
         """Set the show prompts setting"""
         self.config["show_prompts"] = show_prompts
-        return self.save_config() 
+        return self.save_config()
+        
+    def get_rate_limit_info(self, model_name=None):
+        """Get rate limit information for a model"""
+        model_info = self.get_model_info(model_name)
+        if model_info:
+            return f"Rate Limits - RPM: {model_info['rpm']}, TPM: {model_info['tpm']:,}, RPD: {model_info['rpd']}"
+        return "Rate limit information not available" 

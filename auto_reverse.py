@@ -84,6 +84,46 @@ class ActionHandler(ida_kernwin.action_handler_t):
     def update(self, ctx):
         return ida_kernwin.AST_ENABLE_ALWAYS
 
+class AutoReversePopupHook(ida_kernwin.UI_Hooks):
+    """Popup hook to add context menu items"""
+    def __init__(self, plugin):
+        ida_kernwin.UI_Hooks.__init__(self)
+        self.plugin = plugin
+        self.context_actions = [
+            ("AutoReverse:AnalyzeFunction", "AutoReverse: Analyze Current Item"),
+                            ("AutoReverse:AddToChat", "AutoReverse: Add Item to Open Chat"),
+            ("AutoReverse:AnalyzeStructure", "AutoReverse: Analyze Structure"),
+            ("AutoReverse:RenameVariables", "AutoReverse: Rename Variables"),
+            ("AutoReverse:SetFunctionType", "AutoReverse: Set Function Type")
+        ]
+    
+    def finish_populating_widget_popup(self, widget, popup):
+        """Add AutoReverse items to context menu"""
+        try:
+            # Check if this is a relevant widget
+            widget_type = ida_kernwin.get_widget_type(widget)
+            widget_title = ida_kernwin.get_widget_title(widget)
+            
+            # Add items to relevant views
+            if (widget_type == ida_kernwin.BWN_DISASM or 
+                widget_type == ida_kernwin.BWN_PSEUDOCODE or
+                "IDA View" in widget_title or
+                "Pseudocode" in widget_title):
+                
+                # Add separator
+                ida_kernwin.attach_action_to_popup(widget, popup, None, None)
+                
+                # Add our actions
+                for action_name, label in self.context_actions:
+                    ida_kernwin.attach_action_to_popup(widget, popup, action_name, None)
+                    
+                return 0
+                
+        except Exception as e:
+            print(f"AutoReverse: Error in popup hook: {e}")
+            
+        return 0
+
 class AutoReversePlugin(ida_idaapi.plugin_t):
     flags = ida_idaapi.PLUGIN_KEEP
     comment = "AI-powered reverse engineering assistant using Google Gemini"
@@ -102,6 +142,8 @@ class AutoReversePlugin(ida_idaapi.plugin_t):
         self.variable_renamer = None
         self.context_gatherer = None
         self.menu_items = []
+        self.popup_hook = None
+        self.closed_chat_sessions = {}  # Store closed chat sessions for restoration
         
         print("AutoReverse: Plugin initialized")
 
@@ -113,12 +155,16 @@ class AutoReversePlugin(ida_idaapi.plugin_t):
             if not MODULES_LOADED:
                 print("AutoReverse: Modules not loaded, creating fallback menu")
                 self.create_fallback_menu()
+                # Still install popup hook even in fallback mode
+                self.popup_hook = AutoReversePopupHook(self)
+                self.popup_hook.hook()
+                print("AutoReverse: Installed popup hook for context menus (fallback mode)")
                 self.initialized = True
                 return ida_idaapi.PLUGIN_KEEP
             
             # Initialize components
             self.config_manager = ConfigManager()
-            self.gemini_client = GeminiClient()
+            self.gemini_client = GeminiClient(config_manager=self.config_manager)  # Pass config manager
             self.struct_analyzer = StructAnalyzer()
             self.type_setter = TypeSetter()
             self.ui_manager = UIManager()
@@ -135,6 +181,11 @@ class AutoReversePlugin(ida_idaapi.plugin_t):
             
             # Create menus
             self.create_menus()
+            
+            # Install popup hook for context menus
+            self.popup_hook = AutoReversePopupHook(self)
+            self.popup_hook.hook()
+            print("AutoReverse: Installed popup hook for context menus")
             
             self.initialized = True
             print("AutoReverse: Plugin initialized successfully")
@@ -178,10 +229,21 @@ class AutoReversePlugin(ida_idaapi.plugin_t):
                 ("AutoReverse:ConfigureKey", "AutoReverse: Configure API Key", self.configure_api_key),
                 ("AutoReverse:Settings", "AutoReverse: Settings", self.show_settings),
                 ("AutoReverse:AnalyzeFunction", "AutoReverse: Analyze Current Item", self.analyze_function),
+                ("AutoReverse:AddToChat", "AutoReverse: Add Item to Open Chat", self.add_function_to_chat),
+                ("AutoReverse:RestoreChat", "AutoReverse: Restore Chat Session", self.restore_chat_session),
                 ("AutoReverse:AnalyzeStructure", "AutoReverse: Analyze Structure", self.analyze_structure),
                 ("AutoReverse:RenameVariables", "AutoReverse: Rename Variables", self.rename_variables),
                 ("AutoReverse:SetFunctionType", "AutoReverse: Set Function Type", self.set_function_type),
                 ("AutoReverse:About", "AutoReverse: About", self.show_about),
+            ]
+            
+            # Define which actions should appear in context menus
+            context_menu_actions = [
+                "AutoReverse:AnalyzeFunction",
+                "AutoReverse:AddToChat",
+                "AutoReverse:AnalyzeStructure", 
+                "AutoReverse:RenameVariables",
+                "AutoReverse:SetFunctionType"
             ]
             
             # Register and attach actions
@@ -196,10 +258,44 @@ class AutoReversePlugin(ida_idaapi.plugin_t):
                 
                 if ida_kernwin.register_action(action_desc):
                     self.menu_items.append(action_name)
+                    
+                    # Attach to Edit menu
                     if ida_kernwin.attach_action_to_menu("Edit/", action_name, ida_kernwin.SETMENU_APP):
                         print(f"AutoReverse: Created menu item: {label}")
                     else:
                         print(f"AutoReverse: Failed to attach menu item: {label}")
+                    
+                    # Attach relevant actions to context menus
+                    if action_name in context_menu_actions:
+                        try:
+                            # Try multiple window types for IDA Pro 9.0 compatibility
+                            popup_types = [
+                                "IDA View-A",      # Main disassembly view
+                                "IDA View-B",      # Secondary disassembly view
+                                "Pseudocode-A",    # Main pseudocode view
+                                "Pseudocode-B",    # Secondary pseudocode view
+                                "Functions",       # Functions window
+                                "Disassembly",     # Generic disassembly
+                                "Decompiler"       # Generic decompiler
+                            ]
+                            
+                            attached_count = 0
+                            for popup_type in popup_types:
+                                try:
+                                    if ida_kernwin.attach_action_to_popup(None, None, action_name, popup_type):
+                                        print(f"AutoReverse: Attached {action_name} to {popup_type} context menu")
+                                        attached_count += 1
+                                except Exception as popup_e:
+                                    # Silently ignore - this is expected to fail in IDA Pro 9.0
+                                    pass
+                            
+                            if attached_count == 0:
+                                # Don't show warning since popup hook method will handle this
+                                pass
+                                
+                        except Exception as ctx_e:
+                            print(f"AutoReverse: Error attaching {action_name} to context menu: {ctx_e}")
+                    
                 else:
                     print(f"AutoReverse: Failed to register action: {action_name}")
                     
@@ -319,173 +415,337 @@ class AutoReversePlugin(ida_idaapi.plugin_t):
         if not name:
             name = f"data_{ea:X}"
         
-        print(f"AutoReverse: Gathering context for data element {name}...")
+        print(f"AutoReverse: Gathering comprehensive context for data element {name}...")
         
-        # Gather data context
-        data_context = self._gather_data_context(ea, name)
+        # Gather comprehensive data context using ContextGatherer
+        context_data = self.context_gatherer.gather_data_context(
+            ea,
+            max_xref_lines=50,  # Lines of disassembly per referencing function
+            max_xrefs=8        # Max number of references to analyze
+        )
         
-        self._perform_analysis(f"Data Analysis: {name}", data_context, "data")
+        if "error" in context_data:
+            ida_kernwin.warning(f"Context gathering failed: {context_data['error']}")
+            return
+        
+        # Format context for AI analysis
+        formatted_context = self.context_gatherer.format_data_context_for_ai(context_data)
+        
+        self._perform_analysis(f"Data Analysis: {name}", formatted_context, "data")
 
-    def _gather_data_context(self, ea, name):
-        """Gather context for data elements"""
-        context = f"=== DATA ANALYSIS FOR {name} ===\n\n"
-        
-        # Basic info
-        context += f"**Address**: 0x{ea:X}\n"
-        context += f"**Name**: {name}\n"
-        
-        # Get data type and size
+    def add_function_to_chat(self):
+        """Add the current function or data item to an existing open chat"""
         try:
-            data_type = ida_bytes.get_type(ea)
-            if data_type:
-                context += f"**Type**: {data_type}\n"
-        except:
-            pass
-        
-        # Get the actual data/value
+            if not self.gemini_client or not self.context_gatherer:
+                ida_kernwin.warning("Required components not available")
+                return
+                
+            # Get current address
+            ea = ida_kernwin.get_screen_ea()
+            
+            # Check if it's a function or data
+            func = ida_funcs.get_func(ea)
+            if not func:
+                # Not in a function - check if it's a data element
+                flags = ida_bytes.get_flags(ea)
+                if not (ida_bytes.is_data(flags) or ida_bytes.is_unknown(flags)):
+                    ida_kernwin.warning("Please position cursor on a function or data element")
+                    return
+                
+                # It's a data element - we'll handle this case below
+                item_type = "data"
+                item_name = ida_name.get_name(ea) or f"data_{ea:X}"
+            else:
+                # It's a function
+                item_type = "function" 
+                item_name = ida_funcs.get_func_name(func.start_ea)
+                
+            # Find existing chat widgets
+            if not self.ui_manager or not hasattr(self.ui_manager, 'result_widgets'):
+                ida_kernwin.warning("No chat sessions found")
+                return
+                
+            chat_widgets = []
+            for widget_name, widget in self.ui_manager.result_widgets.items():
+                if hasattr(widget, 'chat_session') and widget.chat_session:
+                    chat_widgets.append((widget_name, widget))
+            
+            if not chat_widgets:
+                ida_kernwin.warning("No open chat sessions found. Please use 'Analyze Current Item' first to create a chat session.")
+                return
+            
+            # Select which chat to add to
+            target_widget = None
+            if len(chat_widgets) == 1:
+                # Only one chat - use it
+                target_widget = chat_widgets[0][1]
+                print(f"AutoReverse: Adding {item_type} to chat: {chat_widgets[0][0]}")
+            else:
+                # Multiple chats - let user choose
+                choices = []
+                for i, (widget_name, widget) in enumerate(chat_widgets):
+                    # Extract item name from widget name for display
+                    display_name = widget_name.replace("AutoReverse_", "").replace("_", " ")
+                    choices.append(f"{i + 1}. {display_name}")
+                
+                choice_text = "Multiple chat sessions found. Choose which one to add to:\n\n" + "\n".join(choices)
+                selected = ida_kernwin.ask_long(1, choice_text + f"\n\nEnter number (1-{len(chat_widgets)}):")
+                
+                if selected and 1 <= selected <= len(chat_widgets):
+                    target_widget = chat_widgets[selected - 1][1]
+                    print(f"AutoReverse: Adding {item_type} to selected chat: {chat_widgets[selected - 1][0]}")
+                else:
+                    ida_kernwin.warning("Invalid selection")
+                    return
+            
+            # Gather context based on item type
+            print(f"AutoReverse: Gathering context for {item_type} {item_name} to add to chat...")
+            
+            if item_type == "function":
+                # Gather function context
+                context_data = self.context_gatherer.gather_function_context(
+                    func.start_ea, 
+                    max_disasm_lines=80,
+                    max_caller_lines=40,
+                    max_callers=8
+                )
+                
+                if "error" in context_data:
+                    ida_kernwin.warning(f"Context gathering failed: {context_data['error']}")
+                    return
+                
+                # Format context for AI analysis
+                formatted_context = self.context_gatherer.format_context_for_ai(context_data)
+                
+            else:  # data
+                # Gather data context
+                context_data = self.context_gatherer.gather_data_context(
+                    ea,
+                    max_xref_lines=50,
+                    max_xrefs=8
+                )
+                
+                if "error" in context_data:
+                    ida_kernwin.warning(f"Context gathering failed: {context_data['error']}")
+                    return
+                
+                # Format context for AI analysis
+                formatted_context = self.context_gatherer.format_data_context_for_ai(context_data)
+            
+            # Add to existing chat
+            self._add_to_existing_chat(target_widget, item_name, formatted_context)
+                
+        except Exception as e:
+            print(f"AutoReverse: Error adding item to chat: {e}")
+            print(f"AutoReverse: Error traceback: {traceback.format_exc()}")
+            ida_kernwin.warning(f"Error adding item to chat: {e}\n\nCheck IDA Output window for detailed error information.")
+
+    def _add_to_existing_chat(self, target_widget, item_name, context):
+        """Add function or data context to an existing chat widget"""
         try:
-            # Try to get as different data types
-            byte_val = ida_bytes.get_byte(ea)
-            word_val = ida_bytes.get_word(ea)
-            dword_val = ida_bytes.get_dword(ea)
-            qword_val = ida_bytes.get_qword(ea)
+            # Prepare the message to add to chat
+            user_message = f"Please also analyze this related item '{item_name}' and explain how it connects to our previous discussion:\n\n{context}"
             
-            context += f"**Values**:\n"
-            context += f"  - Byte: 0x{byte_val:02X} ({byte_val})\n"
-            context += f"  - Word: 0x{word_val:04X} ({word_val})\n"
-            context += f"  - DWord: 0x{dword_val:08X} ({dword_val})\n"
-            context += f"  - QWord: 0x{qword_val:016X} ({qword_val})\n"
+            # Show prompts if enabled (before sending)
+            try:
+                from config_manager import ConfigManager
+                config = ConfigManager()
+                if config.get_show_prompts():
+                    # Show what we're sending to the AI
+                    if hasattr(target_widget, 'append_message'):
+                        target_widget.append_message("System", f"**Adding Function Prompt:**\n\n{user_message}")
+            except Exception as prompt_error:
+                print(f"AutoReverse: Error showing add-to-chat prompt: {prompt_error}")
             
-            # If it looks like a pointer, dereference it
-            if dword_val > 0x400000 and dword_val < 0x80000000:  # Reasonable address range
+            # Show progress
+            progress = ProgressDialog("Adding to Chat", f"Adding {item_name} to existing chat...")
+            progress.show()
+            
+            def add_to_chat_thread():
                 try:
-                    pointed_name = ida_name.get_name(dword_val)
-                    if pointed_name:
-                        context += f"  - Points to: {pointed_name} (0x{dword_val:08X})\n"
-                    else:
-                        # Try to get some data from the pointed location
-                        pointed_data = ida_bytes.get_bytes(dword_val, 16)
-                        if pointed_data:
-                            context += f"  - Points to data: {pointed_data.hex()}\n"
-                except:
-                    pass
+                    print(f"AutoReverse: Sending additional item {item_name} to chat")
+                    
+                    # Send message to existing chat session
+                    response = target_widget.chat_session.send_message(user_message)
+                    
+                    if not response:
+                        raise ValueError("No response from chat session")
+                    
+                    print(f"AutoReverse: Received response for {item_name}, length: {len(response)}")
+                    
+                    def update_chat_ui():
+                        try:
+                            progress.hide()
+                            
+                            # Add the user message and response to the chat display
+                            if hasattr(target_widget, 'append_message'):
+                                # Check if we should show the user message (if prompts weren't already shown)
+                                try:
+                                    from config_manager import ConfigManager
+                                    config = ConfigManager()
+                                    show_prompts = config.get_show_prompts()
+                                except:
+                                    show_prompts = False
+                                
+                                # Only show user message if prompts are disabled (to avoid duplication)
+                                if not show_prompts:
+                                    target_widget.append_message("User", f"**Added Item**: {item_name}\n\nPlease analyze this item and explain how it connects to our previous discussion.")
+                                
+                                target_widget.append_message("AI", response)
+                            else:
+                                # Fallback: append to results_text
+                                if hasattr(target_widget, 'results_text'):
+                                    target_widget.results_text += f"\n\n=== ADDED ITEM: {item_name} ===\n\n{response}"
+                                    if hasattr(target_widget, 'update_display'):
+                                        target_widget.update_display()
+                            
+                            # Bring the chat window to front
+                            try:
+                                # Try PyQt methods first
+                                if hasattr(target_widget.widget, 'activateWindow'):
+                                    target_widget.widget.activateWindow()
+                                    target_widget.widget.raise_()
+                                elif hasattr(target_widget, 'Activate'):
+                                    target_widget.Activate()
+                            except Exception as activate_error:
+                                print(f"AutoReverse: Could not activate window: {activate_error}")
+                                # Continue anyway - the message was still added
+                            
+                            print(f"AutoReverse: Successfully added {item_name} to chat")
+                            
+                        except Exception as ui_error:
+                            print(f"AutoReverse: Error updating chat UI: {ui_error}")
+                            # Fallback to info dialog
+                            ida_kernwin.info(f"Added {item_name} to chat:\n\n{response[:500]}...")
+                    
+                    ida_kernwin.execute_sync(update_chat_ui, ida_kernwin.MFF_WRITE)
+                    
+                except Exception as e:
+                    print(f"AutoReverse: Error in add to chat thread: {e}")
+                    print(f"AutoReverse: Add to chat thread traceback: {traceback.format_exc()}")
+                    def show_error():
+                        progress.hide()
+                        self.ui_manager.show_error(f"Failed to add item to chat: {str(e)}")
+                    ida_kernwin.execute_sync(show_error, ida_kernwin.MFF_WRITE)
+            
+            thread = threading.Thread(target=add_to_chat_thread)
+            thread.daemon = True
+            thread.start()
             
         except Exception as e:
-            context += f"**Error reading data**: {e}\n"
-        
-        # Get cross-references TO this data
-        context += f"\n**=== REFERENCES TO {name} ===**\n"
-        xref_count = 0
-        
-        # Get data references
-        xref = ida_xref.get_first_dref_to(ea)
-        while xref != ida_idaapi.BADADDR and xref_count < 10:
-            ref_name = ida_name.get_name(xref)
-            if not ref_name:
-                ref_name = f"sub_{xref:X}"
-                
-            # Get the function containing this reference
-            ref_func = ida_funcs.get_func(xref)
-            if ref_func:
-                ref_func_name = ida_funcs.get_func_name(ref_func.start_ea)
-                context += f"  - Referenced by {ref_func_name} at 0x{xref:X}\n"
-                
-                # Get some context around the reference
-                try:
-                    disasm = ida_lines.generate_disasm_line(xref, 0)
-                    context += f"    Instruction: {disasm}\n"
-                except:
-                    pass
-            else:
-                context += f"  - Referenced at 0x{xref:X}\n"
-            
-            xref_count += 1
-            xref = ida_xref.get_next_dref_to(ea, xref)
-        
-        # Also check code references
-        xref = ida_xref.get_first_cref_to(ea)
-        while xref != ida_idaapi.BADADDR and xref_count < 10:
-            ref_name = ida_name.get_name(xref)
-            if not ref_name:
-                ref_name = f"sub_{xref:X}"
-                
-            # Get the function containing this reference
-            ref_func = ida_funcs.get_func(xref)
-            if ref_func:
-                ref_func_name = ida_funcs.get_func_name(ref_func.start_ea)
-                context += f"  - Code reference from {ref_func_name} at 0x{xref:X}\n"
-                
-                # Get some context around the reference
-                try:
-                    disasm = ida_lines.generate_disasm_line(xref, 0)
-                    context += f"    Instruction: {disasm}\n"
-                except:
-                    pass
-            else:
-                context += f"  - Code reference at 0x{xref:X}\n"
-            
-            xref_count += 1
-            xref = ida_xref.get_next_cref_to(ea, xref)
-        
-        if xref_count >= 10:
-            context += f"... and more references\n"
-        elif xref_count == 0:
-            context += "  - No references found\n"
-        
-        # Get cross-references FROM this data (if it's a pointer)
-        context += f"\n**=== REFERENCES FROM {name} ===**\n"
+            print(f"AutoReverse: Error setting up add to chat: {e}")
+            ida_kernwin.warning(f"Error setting up add to chat: {e}")
+
+    def restore_chat_session(self):
+        """Restore a previously closed chat session"""
         try:
-            pointed_addr = ida_bytes.get_dword(ea)
-            if pointed_addr > 0x400000 and pointed_addr < 0x80000000:
-                pointed_name = ida_name.get_name(pointed_addr)
-                if pointed_name:
-                    context += f"  - Points to: {pointed_name} (0x{pointed_addr:08X})\n"
+            if not self.closed_chat_sessions:
+                ida_kernwin.info("No closed chat sessions available to restore.")
+                return
+            
+            # If only one closed session, restore it directly
+            if len(self.closed_chat_sessions) == 1:
+                session_name = list(self.closed_chat_sessions.keys())[0]
+                self._restore_specific_chat(session_name)
+                return
+            
+            # Multiple sessions - let user choose
+            choices = []
+            session_names = list(self.closed_chat_sessions.keys())
+            
+            for i, session_name in enumerate(session_names):
+                # Clean up the display name
+                display_name = session_name.replace("AutoReverse_", "").replace("_", " ")
+                choices.append(f"{i + 1}. {display_name}")
+            
+            choice_text = "Multiple closed chat sessions found. Choose which one to restore:\n\n" + "\n".join(choices)
+            selected = ida_kernwin.ask_long(1, choice_text + f"\n\nEnter number (1-{len(session_names)}):")
+            
+            if selected and 1 <= selected <= len(session_names):
+                session_name = session_names[selected - 1]
+                self._restore_specific_chat(session_name)
+            else:
+                ida_kernwin.warning("Invalid selection")
+                
+        except Exception as e:
+            print(f"AutoReverse: Error restoring chat session: {e}")
+            ida_kernwin.warning(f"Error restoring chat session: {e}")
+
+    def _restore_specific_chat(self, session_name):
+        """Restore a specific chat session"""
+        try:
+            if session_name not in self.closed_chat_sessions:
+                ida_kernwin.warning(f"Chat session {session_name} not found")
+                return
+            
+            session_data = self.closed_chat_sessions[session_name]
+            chat_session = session_data['chat_session']
+            title = session_data['title']
+            prompts = session_data.get('prompts', {})
+            original_results = session_data.get('original_results', '')
+            
+            print(f"AutoReverse: Restoring chat session: {title}")
+            
+            # Create new widget with existing chat session (marked as restored)
+            widget_name = session_name
+            results_widget = AutoReverseResultsWidget(title=title, chat_session=chat_session, prompts=prompts, is_restored=True)
+            
+            # Set original results as fallback in case history restoration fails
+            results_widget.results_text = original_results
+            
+            # Show the restored widget
+            results_widget.Show(widget_name)
+            self.ui_manager.result_widgets[widget_name] = results_widget
+            
+            # Set up close handler for this restored widget
+            self._setup_widget_close_handler(results_widget, widget_name)
+            
+            # Remove from closed sessions (it's now open again)
+            del self.closed_chat_sessions[session_name]
+            
+            print(f"AutoReverse: Successfully restored chat session: {title}")
+            ida_kernwin.info(f"Restored chat session: {title}")
+            
+        except Exception as e:
+            print(f"AutoReverse: Error restoring specific chat {session_name}: {e}")
+            ida_kernwin.warning(f"Error restoring chat session: {e}")
+
+    def _setup_widget_close_handler(self, widget, widget_name):
+        """Set up close handler to save chat session when widget is closed"""
+        try:
+            # Store original OnClose method
+            original_on_close = getattr(widget, 'OnClose', None)
+            
+            def enhanced_on_close(form):
+                try:
+                    # Save the chat session before closing
+                    if hasattr(widget, 'chat_session') and widget.chat_session:
+                        self.closed_chat_sessions[widget_name] = {
+                            'chat_session': widget.chat_session,
+                            'title': widget.title,
+                            'prompts': getattr(widget, 'prompts', {}),
+                            'original_results': getattr(widget, 'results_text', '')
+                        }
+                        print(f"AutoReverse: Saved chat session for restoration: {widget.title}")
                     
-                    # If it points to a function, get some info
-                    pointed_func = ida_funcs.get_func(pointed_addr)
-                    if pointed_func:
-                        pointed_func_name = ida_funcs.get_func_name(pointed_func.start_ea)
-                        context += f"    Function: {pointed_func_name}\n"
+                    # Remove from active widgets
+                    if widget_name in self.ui_manager.result_widgets:
+                        del self.ui_manager.result_widgets[widget_name]
+                    
+                    # Call original close handler if it exists
+                    if original_on_close:
+                        original_on_close(form)
                         
-                        # Get function signature if available
-                        try:
-                            func_type = ida_typeinf.get_type(pointed_addr)
-                            if func_type:
-                                context += f"    Type: {func_type}\n"
-                        except:
-                            pass
-                else:
-                    context += f"  - Points to unnamed location: 0x{pointed_addr:08X}\n"
-            else:
-                context += f"  - Not a valid pointer\n"
-        except:
-            context += f"  - Error analyzing pointer\n"
-        
-        # Add some surrounding context
-        context += f"\n**=== SURROUNDING DATA ===**\n"
-        try:
-            # Show some data before and after
-            start_ea = ea - 32
-            end_ea = ea + 32
+                except Exception as close_error:
+                    print(f"AutoReverse: Error in close handler: {close_error}")
             
-            for addr in range(start_ea, end_ea, 4):
-                if addr < 0:
-                    continue
-                    
-                try:
-                    val = ida_bytes.get_dword(addr)
-                    addr_name = ida_name.get_name(addr)
-                    
-                    marker = " >>> " if addr == ea else "     "
-                    name_part = f" ({addr_name})" if addr_name else ""
-                    
-                    context += f"{marker}0x{addr:08X}: 0x{val:08X}{name_part}\n"
-                except:
-                    pass
-        except:
-            pass
-        
-        return context
+            # Replace the OnClose method
+            widget.OnClose = enhanced_on_close
+            
+        except Exception as e:
+            print(f"AutoReverse: Error setting up close handler: {e}")
+
+
 
     def _perform_analysis(self, title, context, analysis_type):
         """Perform the actual AI analysis"""
@@ -619,6 +879,10 @@ Be specific to WoW and focus on actual usage patterns."""
                         
                         results_widget.Show(widget_name)
                         self.ui_manager.result_widgets[widget_name] = results_widget
+                        
+                        # Set up close handler to save chat session when closed
+                        self._setup_widget_close_handler(results_widget, widget_name)
+                        
                         print(f"AutoReverse: Widget shown successfully: {widget_name}")
                         
                     except Exception as ui_error:
@@ -720,57 +984,185 @@ Be specific to WoW and focus on actual usage patterns."""
             ida_kernwin.warning(f"Error setting function type: {e}")
 
     def show_settings(self):
-        """Show settings dialog"""
+        """Show advanced settings dialog with model selection and other options"""
         try:
             if not self.config_manager:
                 ida_kernwin.warning("Config manager not available")
                 return
             
             # Get current settings
-            current_show_prompts = self.config_manager.get_show_prompts()
             current_model = self.config_manager.get_model()
-            current_temperature = self.config_manager.get_temperature()
-            current_max_tokens = self.config_manager.get_max_tokens()
+            current_show_prompts = self.config_manager.get_show_prompts()
+            available_models = self.config_manager.get_available_models()
             
-            # Create settings dialog text
-            settings_text = f"""AutoReverse Settings
+            # First, ask what they want to configure
+            model_display_name = available_models.get(current_model, {}).get('display_name', current_model)
+            
+            settings_menu = f"""AutoReverse Settings
 
 Current Settings:
-- Show Prompts in Chat: {'Yes' if current_show_prompts else 'No'}
-- Model: {current_model}
-- Temperature: {current_temperature}
-- Max Tokens: {current_max_tokens}
+• Model: {model_display_name}
+• Show Prompts in Chat: {'Enabled' if current_show_prompts else 'Disabled'}
 
-Recent Updates:
-- Context limits reduced for API efficiency
-- Rate limiting error handling improved
-- Max callers per function: 8 (reduced from 10)
-- Max disassembly lines: 80 (reduced from 100)
+What would you like to configure?
 
-Would you like to toggle the 'Show Prompts in Chat' setting?
-This will show you the exact prompts sent to the AI model in the chat window.
+1. Change AI Model (Gemini 2.5 Pro, Flash, etc.)
+2. Toggle Show Prompts in Chat
+3. View All Settings Info
+0. Cancel
 
-Current setting: {'Enabled' if current_show_prompts else 'Disabled'}
-
-Note: If you're hitting API rate limits, try analyzing smaller functions first."""
+Enter number (1-3) or 0 to cancel:"""
             
-            # Ask user if they want to toggle the setting
-            choice = ida_kernwin.ask_yn(
-                ida_kernwin.ASKBTN_YES,
-                settings_text
-            )
+            choice = ida_kernwin.ask_long(1, settings_menu)
             
-            if choice == ida_kernwin.ASKBTN_YES:
-                # Toggle the setting
-                new_value = not current_show_prompts
-                self.config_manager.set_show_prompts(new_value)
-                
-                status = "enabled" if new_value else "disabled"
-                ida_kernwin.info(f"Show Prompts in Chat has been {status}!")
+            if choice == 1:
+                # Model selection
+                self._show_model_selection()
+            elif choice == 2:
+                # Toggle show prompts
+                self._toggle_show_prompts()
+            elif choice == 3:
+                # Show all settings info
+                self._show_all_settings_info()
+            elif choice == 0:
+                # Cancel
+                return
+            else:
+                ida_kernwin.warning("Invalid selection")
                 
         except Exception as e:
             print(f"AutoReverse: Error showing settings: {e}")
             ida_kernwin.warning(f"Error showing settings: {e}")
+    
+    def _show_model_selection(self):
+        """Show model selection dialog"""
+        try:
+            current_model = self.config_manager.get_model()
+            available_models = self.config_manager.get_available_models()
+            
+            # Create model selection dialog
+            model_choices = []
+            model_keys = []
+            
+            for i, (key, info) in enumerate(available_models.items(), 1):
+                display_text = f"{i}. {info['display_name']} - {info['description']}"
+                rate_info = f"   (RPM: {info['rpm']}, TPM: {info['tpm']:,}, RPD: {info['rpd']})"
+                model_choices.append(f"{display_text}\n{rate_info}")
+                model_keys.append(key)
+            
+            # Find current model index
+            current_index = 1
+            if current_model in model_keys:
+                current_index = model_keys.index(current_model) + 1
+            
+            # Create selection dialog text
+            dialog_text = "AutoReverse - Model Selection\n\n"
+            dialog_text += "Choose the model for analysis:\n\n"
+            dialog_text += "RPM = Requests Per Minute\n"
+            dialog_text += "TPM = Tokens Per Minute\n" 
+            dialog_text += "RPD = Requests Per Day\n\n"
+            dialog_text += "Available Models:\n\n"
+            dialog_text += "\n\n".join(model_choices)
+            dialog_text += "\n\n"
+            dialog_text += "Recommendations:\n"
+            dialog_text += "• Complex analysis: Gemini 2.5 Pro\n"
+            dialog_text += "• General use: Gemini 2.5 Flash\n"
+            dialog_text += "• Bulk analysis: Gemini 2.0 Flash (Experimental)\n"
+            dialog_text += "• Reasoning tasks: Gemini 2.0 Flash Thinking\n\n"
+            dialog_text += f"Current model: {available_models.get(current_model, {}).get('display_name', current_model)}\n\n"
+            dialog_text += f"Enter number (1-{len(model_keys)}) or 0 to cancel:"
+            
+            # Show model selection dialog
+            selected_index = ida_kernwin.ask_long(current_index, dialog_text)
+            
+            if selected_index and 1 <= selected_index <= len(model_keys):
+                selected_model = model_keys[selected_index - 1]
+                if selected_model != current_model:
+                    # Update model
+                    self.config_manager.set_model(selected_model)
+                    self.gemini_client.set_model(selected_model)
+                    
+                    model_info = available_models[selected_model]
+                    ida_kernwin.info(f"Model updated to: {model_info['display_name']}\n\n" +
+                                   f"Description: {model_info['description']}\n" +
+                                   f"Rate Limits: RPM: {model_info['rpm']}, TPM: {model_info['tpm']:,}, RPD: {model_info['rpd']}\n\n" +
+                                   f"Recommended for: {model_info['recommended_for']}")
+                else:
+                    ida_kernwin.info("Model unchanged.")
+            elif selected_index == 0:
+                # User cancelled
+                return
+            else:
+                ida_kernwin.warning("Invalid selection")
+                
+        except Exception as e:
+            print(f"AutoReverse: Error in model selection: {e}")
+            ida_kernwin.warning(f"Error in model selection: {e}")
+    
+    def _toggle_show_prompts(self):
+        """Toggle the show prompts setting"""
+        try:
+            current_show_prompts = self.config_manager.get_show_prompts()
+            
+            choice = ida_kernwin.ask_yn(
+                ida_kernwin.ASKBTN_YES if current_show_prompts else ida_kernwin.ASKBTN_NO,
+                f"Show Prompts in Chat\n\n" +
+                f"Current setting: {'Enabled' if current_show_prompts else 'Disabled'}\n\n" +
+                f"When enabled, this setting displays the exact prompts sent to the AI model in chat windows. " +
+                f"This is useful for understanding what context the AI receives, but makes the chat longer.\n\n" +
+                f"Would you like to toggle this setting?\n\n" +
+                f"New setting would be: {'Disabled' if current_show_prompts else 'Enabled'}"
+            )
+            
+            if choice == ida_kernwin.ASKBTN_YES:
+                new_value = not current_show_prompts
+                self.config_manager.set_show_prompts(new_value)
+                status = "enabled" if new_value else "disabled"
+                ida_kernwin.info(f"Show Prompts in Chat has been {status}!")
+            else:
+                ida_kernwin.info("Setting unchanged.")
+                
+        except Exception as e:
+            print(f"AutoReverse: Error toggling show prompts: {e}")
+            ida_kernwin.warning(f"Error toggling show prompts: {e}")
+    
+    def _show_all_settings_info(self):
+        """Show detailed information about all settings"""
+        try:
+            current_model = self.config_manager.get_model()
+            current_show_prompts = self.config_manager.get_show_prompts()
+            available_models = self.config_manager.get_available_models()
+            model_info = available_models.get(current_model, {})
+            
+            info_text = f"""AutoReverse - All Settings
+
+CURRENT CONFIGURATION:
+• AI Model: {model_info.get('display_name', current_model)}
+• Show Prompts: {'Enabled' if current_show_prompts else 'Disabled'}
+
+CURRENT MODEL DETAILS:
+• Description: {model_info.get('description', 'N/A')}
+• Rate Limits: RPM: {model_info.get('rpm', 'N/A')}, TPM: {model_info.get('tpm', 'N/A'):,}, RPD: {model_info.get('rpd', 'N/A')}
+• Best for: {model_info.get('recommended_for', 'N/A')}
+
+PLUGIN CONTEXT LIMITS:
+• Max callers per function: 8 (reduced for API efficiency)
+• Max disassembly lines: 80 (reduced for API efficiency)
+• Max caller lines: 40 (reduced for API efficiency)
+
+RATE LIMITING INFO:
+If you're hitting API rate limits, try:
+• Using Gemini 2.0 Flash models (higher limits)
+• Analyzing smaller functions first
+• Avoiding functions with many cross-references
+
+To modify settings, use 'AutoReverse > Settings' again."""
+            
+            ida_kernwin.info(info_text)
+            
+        except Exception as e:
+            print(f"AutoReverse: Error showing settings info: {e}")
+            ida_kernwin.warning(f"Error showing settings info: {e}")
 
     def show_about(self):
         """Show about dialog"""
@@ -780,10 +1172,12 @@ AI-powered reverse engineering assistant using Google Gemini
 
 Features:
 - Function analysis and documentation
+- Add functions to existing chat sessions
+- Restore closed chat sessions
 - Structure analysis and creation
 - Variable renaming
 - Type setting
-- AI-powered insights
+- AI-powered insights with context
 
 Author: AutoReverse Team
 License: MIT
@@ -792,6 +1186,8 @@ To use this plugin:
 1. Configure your Google Gemini API key
 2. Select a function or structure to analyze
 3. Use the menu options to perform analysis
+4. Build context by adding related functions to chats
+5. Restore closed chats to continue conversations
 
 For support, check the plugin documentation.
 """
@@ -818,9 +1214,34 @@ For support, check the plugin documentation.
             if self.ui_manager:
                 self.ui_manager.cleanup()
             
+            # Unhook popup hook
+            if self.popup_hook:
+                self.popup_hook.unhook()
+                self.popup_hook = None
+                print("AutoReverse: Removed popup hook")
+            
+            # Detach actions from context menus first
+            context_menu_actions = [
+                "AutoReverse:AnalyzeFunction",
+                "AutoReverse:AddToChat",
+                "AutoReverse:AnalyzeStructure", 
+                "AutoReverse:RenameVariables",
+                "AutoReverse:SetFunctionType"
+            ]
+            
+            for action_name in context_menu_actions:
+                try:
+                    # Detach from context menus
+                    ida_kernwin.detach_action_from_popup(None, None, action_name)
+                except:
+                    pass  # Ignore errors during cleanup
+            
             # Unregister actions
             for action_name in self.menu_items:
                 ida_kernwin.unregister_action(action_name)
+            
+            # Clear closed chat sessions
+            self.closed_chat_sessions.clear()
             
             print("AutoReverse: Plugin terminated")
             

@@ -17,9 +17,15 @@ except ImportError:
     print("AutoReverse: Using fallback HTTP requests (install google-generativeai for better performance)")
 
 class GeminiClient:
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: str = None, config_manager=None):
         self.api_key = api_key
-        self.model_name = "gemini-2.5-pro"
+        self.config_manager = config_manager
+        
+        # Get model from config manager or use default
+        if self.config_manager:
+            self.model_name = self.config_manager.get_model()
+        else:
+            self.model_name = "gemini-2.5-pro"  # Fallback default
         
         if SDK_AVAILABLE:
             if api_key:
@@ -29,7 +35,7 @@ class GeminiClient:
             self._configure_model()
         else:
             # Fallback to HTTP requests
-            self.base_url = "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-pro:generateContent"
+            self.base_url = f"https://generativelanguage.googleapis.com/v1/models/{self.model_name}:generateContent"
             self.session = requests.Session()
             self.session.headers.update({
                 'Content-Type': 'application/json',
@@ -41,6 +47,29 @@ class GeminiClient:
         if SDK_AVAILABLE:
             genai.configure(api_key=api_key)
             self._configure_model()
+    
+    def set_model(self, model_name: str):
+        """Set the model name"""
+        self.model_name = model_name
+        if self.config_manager:
+            self.config_manager.set_model(model_name)
+        
+        # Update the base URL for HTTP requests
+        if not SDK_AVAILABLE:
+            self.base_url = f"https://generativelanguage.googleapis.com/v1/models/{self.model_name}:generateContent"
+        
+        # Reconfigure the model
+        self._configure_model()
+    
+    def get_model(self) -> str:
+        """Get the current model name"""
+        return self.model_name
+    
+    def get_model_info(self) -> Dict[str, Any]:
+        """Get information about the current model"""
+        if self.config_manager:
+            return self.config_manager.get_model_info(self.model_name)
+        return {}
     
     def _configure_model(self):
         """Configure the Gemini model with safety settings"""
@@ -86,6 +115,8 @@ class GeminiClient:
                 safety_settings=safety_settings,
                 generation_config=generation_config
             )
+            
+            print(f"AutoReverse: Configured model: {self.model_name}")
             
         except Exception as e:
             print(f"AutoReverse: Error configuring model: {e}")
@@ -481,7 +512,7 @@ Please provide a well-typed function signature that accurately represents the fu
             model_config['system_instruction'] = system_instruction
 
         model = genai.GenerativeModel(
-            model_name=self.model_name,
+            model_name=self.model_name,  # Use the current model name
             **model_config
         )
 
@@ -490,13 +521,14 @@ Please provide a well-typed function signature that accurately represents the fu
             chat_kwargs['history'] = history
 
         chat = model.start_chat(**chat_kwargs)
-        return ChatSession(chat, model)
+        return ChatSession(chat, model, self.config_manager)
 
 class ChatSession:
     """Wrapper for chat session"""
-    def __init__(self, chat, model):
+    def __init__(self, chat, model, config_manager=None):
         self.chat = chat
         self.model = model
+        self.config_manager = config_manager
         self.history = chat.history
 
     def send_message(self, message: str) -> str:
@@ -524,5 +556,16 @@ class ChatSession:
             return 0
 
     def get_max_tokens(self) -> int:
-        """Get model's max input tokens for Gemini 2.5 Pro"""
-        return 2097152  # 2M tokens for Gemini 2.5 Pro 
+        """Get model's max input tokens based on the model type"""
+        if self.config_manager:
+            model_name = self.config_manager.get_model()
+            # Different models have different context windows
+            if "2.5-pro" in model_name:
+                return 2097152  # 2M tokens for Gemini 2.5 Pro
+            elif "2.0-flash" in model_name:
+                return 1048576  # 1M tokens for Gemini 2.0 Flash variants
+            elif "2.5-flash" in model_name:
+                return 1048576  # 1M tokens for Gemini 2.5 Flash
+            else:
+                return 1048576  # Default to 1M tokens
+        return 2097152  # Default to 2M tokens if no config manager 
