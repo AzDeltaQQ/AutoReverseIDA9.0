@@ -1,4 +1,4 @@
-edit : this plugin needs PYQT5 i havent added it to the requirements.txt so if you get an error just pip install pyqt and should be GTG
+edit : this plugin needs PYQT5 i havent added it to the requirements.txt so if you get an error just pip install pyqt5 and should be GTG
 
 # AutoReverse Plugin for IDA Pro 9.0
 
