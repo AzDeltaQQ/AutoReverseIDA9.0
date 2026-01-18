@@ -1,5 +1,5 @@
 edit : this plugin needs PYQT5 i havent added it to the requirements.txt so if you get an error just pip install pyqt5 and should be GTG
-
+edit2: also the context grabber needs to be tuned ... as it stands the plugin is functional. but you want to give the ai as much context as possible -> start new chat for new funxtion -> stuff context again 
 # AutoReverse Plugin for IDA Pro 9.0
 
 🤖 **AI-powered reverse engineering assistant using Google Gemini API**
